@@ -132,7 +132,6 @@ fi
 # set ${TMP} for backward compatibility
 TMP=$PHP_BUILD_TMPDIR
 
-# This file gets copied to `$PREFIX/etc/php.ini` once the build is complete.
 # This is by default the PHP tarball's `php.ini-production`.
 PHP_DEFAULT_INI="php.ini-production"
 
@@ -145,6 +144,12 @@ CONFIGURE_OPTIONS=$(cat "$PHP_BUILD_ROOT/share/php-build/default_configure_optio
 
 # Patches to be applied at the source
 PATCH_FILES=""
+
+[ -z "$PHP_VERSION" ] && echo "PHP_VERSION not set" && exit 1
+
+[ -z "$SAPI" ] && SAPI="cli"
+
+[ -z "$INSTALL_ROOT" ] && INSTALL_ROOT=/tmp/"$PHP_VERSION"
 
 [ -z "$PHP_BUILD_EXTRA_MAKE_ARGUMENTS" ] && PHP_BUILD_EXTRA_MAKE_ARGUMENTS=""
 
@@ -304,7 +309,7 @@ function extract_bz2() {
 # List all defintions found in $PHP_BUILD_DEFINITION_PATH
 function list_definitions() {
     local sed_regex_switch='E'
-   
+
     # sed switch -E is BSD specific and only added to UNIX sed after v4.2
     # fallback to -r if -E does not work
     if ! sed -${sed_regex_switch} '' /dev/null > /dev/null 2>&1; then
@@ -329,7 +334,7 @@ function trigger_before_install() {
     if [ -n "$triggers" ]; then
         for trigger in "$triggers_dir"*; do
             log "Before Install Trigger" "$(basename $trigger)"
-            /usr/bin/env PATH="$PREFIX/bin:$PATH" "$trigger" 2>&4
+            /usr/bin/env PATH="$INSTALL_ROOT/usr/bin:$PATH" "$trigger" 2>&4
         done
     fi
 }
@@ -346,7 +351,7 @@ function trigger_after_install() {
     if [ -n "$triggers" ]; then
         for trigger in "$triggers_dir"*; do
             log "After Install Trigger" "$(basename $trigger)"
-            /usr/bin/env PATH="$PREFIX/bin:$PATH" "$trigger" 2>&4
+            /usr/bin/env PATH="$INSTALL_ROOT/usr/bin:$PATH" "$trigger" 2>&4
         done
     fi
 }
@@ -371,6 +376,7 @@ function load_plugins() {
     done
 }
 
+# shellcheck disable=SC2120
 function build_package() {
     local source_path=$1
     local cwd="$(pwd)"
@@ -398,7 +404,7 @@ function build_package() {
     cd "$source_path"
     {
         make -j $(num_cpu_cores) $PHP_BUILD_EXTRA_MAKE_ARGUMENTS
-        make install
+        INSTALL_ROOT=$INSTALL_ROOT make install
         if [ "$PHP_BUILD_KEEP_OBJECT_FILES" == "off" ]; then
             make clean
         fi
@@ -406,50 +412,80 @@ function build_package() {
     cd "$cwd"
 
     # Remove .dSYM extension from executables (OSX issue).
-    if test -n "$(find $PREFIX/bin -maxdepth 1 -name '*.dSYM' -print -quit)"
+    if test -n "$(find $INSTALL_ROOT/usr/bin -maxdepth 1 -name '*.dSYM' -print -quit)"
     then
-        for bin in "$PREFIX/bin/"*.dSYM; do
+        for bin in "$INSTALL_ROOT/usr/bin/"*.dSYM; do
             mv "$bin" "${bin%*.dSYM}"
         done
     fi
 
-    if [ -n "$PHP_DEFAULT_INI" ]; then
-        if [ -f "$source_path/$PHP_DEFAULT_INI" ]; then
-            cp "$source_path/$PHP_DEFAULT_INI" "$PREFIX/etc/php.ini"
-        else
-            if [ -f "$PHP_DEFAULT_INI" ]; then
-                cp "$PHP_DEFAULT_INI" "$PREFIX/etc/php.ini"
-            fi
-        fi
+    # Copy ini files to Install ROOT
+    mkdir -p "$INSTALL_ROOT"/usr/lib/php/"$PHP_VERSION"
+    cp "$source_path"/php.ini-production "$INSTALL_ROOT"/usr/lib/php/"$PHP_VERSION"/
+    cp "$source_path"/php.ini-production "$INSTALL_ROOT"/usr/lib/php/"$PHP_VERSION"/php.ini-production.cli
+    cp "$source_path"/php.ini-development "$INSTALL_ROOT"/usr/lib/php/"$PHP_VERSION"/
+
+    # Get pcntl functions
+    if [ -e "$source_path"/ext/pcntl/pcntl_arginfo.h ]; then
+      pcntl_source_file=ext/pcntl/pcntl_arginfo.h
+      macro=ZEND_FUNCTION
+    else
+      pcntl_source_file=ext/pcntl/php_pcntl.h
+      macro=PHP_FUNCTION
+    fi
+    PCNTL_FUNCTIONS=$(sed -ne "/^$macro/ s/$macro(\(.*\));/\1/;t end;d;:end p" "$source_path"/$pcntl_source_file | tr '\n' ',')
+
+    # Sanitize ini files
+    # Disable memory limit and session.gc_probability on cli production ini.
+    sed -i -e "/memory_limit =/ s/128M/-1/g;" \
+           -e "/session.gc_probability =/ s/1/0/g" "$INSTALL_ROOT"/usr/lib/php/"$PHP_VERSION"/php.ini-production.cli
+
+    # Disable session.gc_probability and expose_php on sapi production ini.
+    # Also add pcntl functions to disable_functions.
+    sed -i -e "/session.gc_probability =/ s/1/0/g;" \
+           -e "/disable_functions =/ s/$/ $PCNTL_FUNCTIONS/g;" \
+           -e "/expose_php =/ s/On/Off/g;" "$INSTALL_ROOT"/usr/lib/php/"$PHP_VERSION"/php.ini-production
+
+    # Disable session.gc_probability on development ini and add pcntl functions to disable_functions.
+    sed -i -e "/session.gc_probability =/ s/1/0/g;" \
+           -e "/disable_functions =/ s/$/ $PCNTL_FUNCTIONS/g;" "$INSTALL_ROOT"/usr/lib/php/"$PHP_VERSION"/php.ini-development
+
+    # Copy the ini files to the config file path for the SAPI.
+    if [ "$SAPI" = "cli" ] && [ "$PHP_DEFAULT_INI" = "php.ini-production" ]; then
+      cp "$INSTALL_ROOT"/usr/lib/php/"$PHP_VERSION"/php.ini-production.cli \
+         "$INSTALL_ROOT"/etc/php/"$PHP_VERSION"/cli/php.ini
+    else
+      cp "$INSTALL_ROOT"/usr/lib/php/"$PHP_VERSION"/"$PHP_DEFAULT_INI" \
+         "$INSTALL_ROOT"/etc/php/"$PHP_VERSION"/"$SAPI"/php.ini
     fi
 
     # Create php-fpm.conf from php-fpm.conf.default
-    if [ -f "$PREFIX/etc/php-fpm.conf.default" ]; then
-        cp "$PREFIX/etc/php-fpm.conf"{.default,}
+    if [ -f "$INSTALL_ROOT/etc/php-fpm.conf.default" ]; then
+        cp "$INSTALL_ROOT/etc/php-fpm.conf"{.default,}
 
-        if [ -f "$PREFIX/etc/php-fpm.d/www.conf.default" ]; then
-            cp "$PREFIX/etc/php-fpm.d/www.conf"{.default,}
+        if [ -f "$INSTALL_ROOT/etc/php-fpm.d/www.conf.default" ]; then
+            cp "$INSTALL_ROOT/etc/php-fpm.d/www.conf"{.default,}
         fi
     fi
 
     # copy the init script
     if [ -f "$source_path/sapi/fpm/init.d.php-fpm" ]; then
-        mkdir -p "$PREFIX/etc/init.d"
-        cp "$source_path/sapi/fpm/init.d.php-fpm" "$PREFIX/etc/init.d/php-fpm"
-        chmod +x "$PREFIX/etc/init.d/php-fpm"
+        mkdir -p "$INSTALL_ROOT/etc/init.d"
+        cp "$source_path/sapi/fpm/init.d.php-fpm" "$INSTALL_ROOT/etc/init.d/php-fpm"
+        chmod +x "$INSTALL_ROOT/etc/init.d/php-fpm"
     fi
 
     # copy the systemd unit
     if [ -f "$source_path/sapi/fpm/php-fpm.service" ]; then
-        mkdir -p "$PREFIX/etc/systemd/system"
-        cp "$source_path/sapi/fpm/php-fpm.service" "$PREFIX/etc/systemd/system/php-fpm.service"
+        mkdir -p "$INSTALL_ROOT/etc/php/$PHP_VERSION/$SAPI/systemd/system"
+        cp "$source_path/sapi/fpm/php-fpm.service" "$INSTALL_ROOT/etc/php/$PHP_VERSION/$SAPI/systemd/system/php-fpm.service"
     fi
 
     # Comment out 'extension_dir' in old default php.ini files (PHP 5.2). In
     # newer ones (>= 5.3) this is already the default.
-    if [ -f "$PREFIX/etc/php.ini" ]; then
-        sed -i.bak -e 's/^\(extension_dir\)/; \1/g' "$PREFIX/etc/php.ini"
-        rm "$PREFIX/etc/php.ini.bak"
+    if [ -f "$INSTALL_ROOT/etc/php/$PHP_VERSION/$SAPI/php.ini" ]; then
+        sed -i.bak -e 's/^\(extension_dir\)/; \1/g' "$INSTALL_ROOT/etc/php/$PHP_VERSION/$SAPI/php.ini"
+        rm "$INSTALL_ROOT/etc/php/$PHP_VERSION/$SAPI/php.ini.bak"
     fi
 }
 
@@ -736,22 +772,22 @@ function configure_package() {
 
     # Add the config-file-path, config-file-scan-dir aswell as the
     # prefix to the build options, these cannot be changed by definitions.
-    local argv="--with-config-file-path="$PREFIX/etc" \
---with-config-file-scan-dir="$PREFIX/etc/conf.d" \
+    local argv="--with-config-file-path="/etc/php/$PHP_VERSION/$SAPI" \
+--with-config-file-scan-dir="/etc/php/$PHP_VERSION/$SAPI/conf.d" \
 --prefix=$PREFIX \
---libexecdir=$PREFIX/libexec \
---datadir=$PREFIX/share/php \
+--libexecdir=$PREFIX/lib/php \
+--datadir=$PREFIX/share/php/$PHP_VERSION \
 --mandir=$PREFIX/share/man \
 $CONFIGURE_OPTIONS"
 
     log "Preparing" "$source_path"
 
-    if [ ! -d "$PREFIX/etc/conf.d" ]; then
-        mkdir -p "$PREFIX/etc/conf.d"
+    if [ ! -d "$INSTALL_ROOT/etc/php/$PHP_VERSION/$SAPI/conf.d" ]; then
+        mkdir -p "$INSTALL_ROOT/etc/php/$PHP_VERSION/$SAPI/conf.d"
     fi
 
-    if [ ! -d "$PREFIX/libexec" ]; then
-        mkdir -p "$PREFIX/libexec"
+    if [ ! -d "$INSTALL_ROOT/$PREFIX/lib/php" ]; then
+        mkdir -p "$INSTALL_ROOT/$PREFIX/lib/php"
     fi
 
     # x86_64 multiarch systems may have lib, lib32 and lib64.
@@ -775,6 +811,9 @@ $CONFIGURE_OPTIONS"
         export ac_cv_exeext=''
     fi
 
+    # Output all the configure arguments
+    echo $argv
+
     ./configure $argv 1>&$CONFIGURE_OUTPUT
 
     # Use php-build prefix for the Apache libexec folder
@@ -791,6 +830,11 @@ function buildconf_wrapper() {
     local result
 
     set +e
+    if [[ "$PHP_VERSION" =~ 5.6|7.[0-3] ]]; then
+        [ -f ext/ext_skel ] && mv ext/ext_skel ext/ext_skel.in
+        aclocal
+        autoreconf -i -f
+    fi
     ./buildconf "$@" >$buildconf_log_path
     result=$?
     set -e
@@ -856,14 +900,14 @@ function find_definition() {
 function enable_builtin_opcache {
     log Info "Enabling Opcache..."
 
-    local ext_dir=$("$PREFIX/bin/php-config" --extension-dir)
+    local ext_dir=$("$INSTALL_ROOT/usr/bin/php-config$PHP_VERSION" --extension-dir)
 
-    if [ ! -f "$ext_dir/opcache.so" ]; then
+    if [ ! -f $INSTALL_ROOT/"$ext_dir/opcache.so" ]; then
         log Info "Aborting: opcache.so not found"
         return 0
     fi
 
-    echo "zend_extension=$ext_dir/opcache.so" >> "$PREFIX/etc/php.ini"
+    echo "zend_extension=$ext_dir/opcache.so" >> "$INSTALL_ROOT/etc/php/$PHP_VERSION/$SAPI/php.ini"
     log Info "Done"
 }
 
