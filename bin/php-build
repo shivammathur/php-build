@@ -416,6 +416,8 @@ function build_package() {
     if [ -n "$PHP_DEFAULT_INI" ]; then
         if [ -f "$source_path/$PHP_DEFAULT_INI" ]; then
             cp "$source_path/$PHP_DEFAULT_INI" "$PREFIX/etc/php.ini"
+            mkdir -p "$PREFIX"/usr/lib/php/"$DEFINITION"
+            cp "$source_path"/php.ini-{production,development} "$PREFIX"/usr/lib/php/"$DEFINITION"
         else
             if [ -f "$PHP_DEFAULT_INI" ]; then
                 cp "$PHP_DEFAULT_INI" "$PREFIX/etc/php.ini"
