@@ -777,6 +777,10 @@ $CONFIGURE_OPTIONS"
         export ac_cv_exeext=''
     fi
 
+    for conf_file in config.guess config.sub; do
+      find . -name "$conf_file" -exec cp /usr/share/automake-*/"$conf_file" {} \;
+    done
+
     ./configure $argv 1>&$CONFIGURE_OUTPUT
 
     # Use php-build prefix for the Apache libexec folder
