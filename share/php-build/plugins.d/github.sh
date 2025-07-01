@@ -30,6 +30,29 @@ function download_from_github() {
     extract_gz "${package_file}" "${PHP_BUILD_TMPDIR}/source/${DEFINITION}"
 }
 
+# Retries a command.
+function retry() {
+    local try=0
+
+    until "$@"; do
+        exit_code="$?"
+        try=$((try + 1))
+
+        if [ $try -lt 10 ]; then
+            sleep "$((2 ** try))"
+        else
+            return $exit_code
+        fi
+    done
+
+    return 0
+}
+
+# Runs git with retry.
+function git_retry() {
+    retry git "$@"
+}
+
 # ### clone_from_github
 # Clones a source from GitHub and extracts it to `${PHP_BUILD_TMPDIR}/source/${DEFINITION}`.
 function clone_from_github() {
@@ -45,7 +68,7 @@ function clone_from_github() {
 
     log "Cloning" "Branch ${branch} from ${repository_url}"
 
-    git clone --branch=${branch} --depth=1 --quiet --recursive ${repository_url} "${directory}" 2>&4
+    git_retry clone --branch=${branch} --depth=1 --quiet --recursive ${repository_url} "${directory}" 2>&4
 
     log "Cloning" "commit $(cd ${directory} && git rev-parse HEAD)"
 }
