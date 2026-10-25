@@ -2,6 +2,9 @@
 
 install_pie() {
 
+    # Current PIE releases cannot run on PHP 5.
+    [[ "$DEFINITION" != 5.* ]] || return 0
+
     local pie="$1"
     local pie_path="$PREFIX/bin/pie"
 

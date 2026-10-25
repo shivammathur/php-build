@@ -653,7 +653,7 @@ function configure_package() {
     local phpLower74=true
     local phpLower80=true
 
-    local baseVersion=$(echo $DEFINITION | grep -Eo '^\d+\.\d+')
+    local baseVersion=$(echo $DEFINITION | grep -Eo '^[0-9]+\.[0-9]+')
     local majorVersion=$(echo $baseVersion | cut -d '.' -f1)
     local minorVersion=$(echo $baseVersion | cut -d '.' -f2)
 

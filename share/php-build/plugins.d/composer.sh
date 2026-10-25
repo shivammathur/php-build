@@ -2,6 +2,9 @@
 
 install_composer() {
 
+    # Keep PHP 5 packages free of an incompatible latest-stable Composer.
+    [[ "$DEFINITION" != 5.* ]] || return 0
+
     local composer_url="$1"
     local composer_path="$PREFIX/bin/composer"
 
